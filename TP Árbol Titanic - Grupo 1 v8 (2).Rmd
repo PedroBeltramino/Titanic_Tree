@@ -1,0 +1,404 @@
+---
+title: "TP Introducción a data mining – Análisis Titanic con árbol de clasificación"
+author: "Melisa Avila, Pedro Beltramino, Paula Bonet, Georgina Cicerchia, Pablo Settimini, Leonardo Saucedo"
+date: "31/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      message=FALSE,
+                      warning=FALSE,
+                      fig.align = "center")
+```
+
+# Indice
+
+1. Introducción
+2. Carga y limpieza de datos
+3. Análisis Descriptivo
+4. Análisis Predictivo con árbol de clasificación
+5. Conclusiones
+6. Publicaciones consultadas
+ 
+# 1. Introducción
+ 
+A partir de la competencia de https://www.kaggle.com/c/titanic se obtuvo la siguiente información:
+
+El naufragio del RMS Titanic fue uno de los peores de la historia y, sin duda, el más conocido. El 15 de abril de 1912, durante su viaje inaugural, el Titanic se hundió después de chocar con un iceberg, costandole la vida a 1502 de los 2224 pasajeros y tripulación. Esta tragedia conmocionó a la comunidad internacional y condujo a mejorar las normas de seguridad para los buques.
+
+Una de las razones por las que el naufragio provocó tantas pérdidas de vidas es que no había suficientes botes salvavidas para los pasajeros y la tripulación. Aunque hubo algún elemento de suerte involucrado en sobrevivir al hundimiento, algunos grupos de personas tenían más probabilidades de sobrevivir que otros, como las mujeres, los niños y la clase alta.
+
+Desde la materia “Introducción a Data Mining” se solicita:
+•	Realizar un análisis descriptivo del dataset brindado por la competencia.
+•	Explicar un análisis predictivo para determinar la probabilidad de sobrevivir al accidente, ayudandonos con un árbol de decisión. Se explica el análisis con mejor métrica AUC (área debajo de la curva).
+
+Se proveen dos archivos para trabajar:
+•	conjunto de entrenamiento (train.csv)
+•	conjunto de validación (test.csv)
+
+# 2. Carga y limpieza de datos
+ 
+```{r paquetes}
+# Adjuntamos los paquetes que se usarán
+
+rm(list = ls())
+
+library(ggplot2)
+library(dplyr)
+library(GGally)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(partykit)
+library(lattice)
+library(caret)
+library(stats)
+library(psych)
+library(caTools)
+library(performance)
+library(prediction)
+library(Metrics)
+```
+
+## Carga de datos
+
+```{r, echo=TRUE}
+test <- read.csv("C:/Users/mavila/Desktop/MDGC/Introducción DM/Titanic/test.csv", stringsAsFactors = FALSE)
+rows_test <- dim(test)[1]
+
+train <- read.csv("C:/Users/mavila/Desktop/MDGC/Introducción DM/Titanic/train.csv", stringsAsFactors = FALSE)
+rows_train <- dim(train)[1]
+```
+
+El conjunto de test tiene `r rows_test` casos
+El conjunto de train tiene `r rows_train` casos
+
+Se definen las variables:
+
+* PassengerId = Id del pasajero
+* Survived = Dicotomica que indica si el pasajero sobrevivio (1)
+* Pclass = Clase en que viajo el pasajero
+* Name = Nombre
+* Sex = Sexo
+* Age = Edad
+* SibSp = Cantidad de hermanos
+* Parch = Padres e hijos
+* Ticket = Nombre del ticket
+* Fare = Tarifa
+* Cabin = Cabina
+* Embarked = Lugar de embarque
+
+## Limpieza de datos
+
+Veamos en primer lugar la estructura del dataset de entrenamiento, y vamos a limpiar algunos valores tanto en la base de entrenamiento como en la de test.
+
+```{r limpieza, echo=TRUE}
+# Estructura del dataset de entrenamiento:
+str(train)
+
+# Detección de datos faltantes:
+colSums(is.na(train))
+colSums(train == "")
+
+#unimos los datasets para agregar/modificar variables necesarias
+test$Survived <- NA
+
+todo <- rbind(train, test)
+
+# Reemplazamos los vacíos por "None".
+todo$Embarked[todo$Embarked == ""] = "None"
+
+#Para age, al existir tantos faltantes vamos a buscar completar con la edad media por titulo (está en el name)
+todo <- todo %>% mutate(Title = gsub(x = Name, "(.*, )|(\\.\\s.*)",""))
+unique(todo$Title)
+
+todo[todo$Title == "Capt"|
+    todo$Title == "Col"|
+    todo$Title == "Don"|
+    todo$Title == "Major"|
+    todo$Title == "Rev"|      
+    todo$Title == "Jonkheer"|
+    todo$Title == "Sir",]$Title <-  "Mr"
+
+todo[todo$Title == "Dona"|
+      todo$Title == "Mlle"|
+      todo$Title == "Mme"|
+     todo$Title == "Miss",]$Title <-  "Ms"
+
+todo[todo$Title == "Lady"| todo$Title == "the Countess",]$Title <-  "Mrs"
+
+todo[todo$Title == "Dr" & todo$Sex == "female",]$Title = "Ms"
+todo[todo$Title == "Dr" & todo$Sex == "male",]$Title = "Mr"
+
+#agrupamos por "Title" y calculamos la edad media para cada grupo
+edad <- todo %>% group_by(Title) %>% 
+  summarize(edad_media = mean(Age, na.rm = T))
+#asignamos a los NA en "Age" la edad media según el "Title"
+todo$Age[which(is.na(todo$Age), todo$Title == "Mr")] <- edad$edad_media[edad$Title == "Mr"]
+todo$Age[which(is.na(todo$Age), todo$Title == "Mr")] <- edad$edad_media[edad$Title == "Master"]
+todo$Age[which(is.na(todo$Age), todo$Title == "Mr")] <- edad$edad_media[edad$Title == "Mrs"]
+todo$Age[which(is.na(todo$Age), todo$Title == "Mr")] <- edad$edad_media[edad$Title == "Ms"]
+
+#chequeo no tener más NA en "Age"
+colSums(is.na(todo))
+
+# En Cabin hay muchos valores vacios, se arma un campo aparte con un verdadero/Falso
+todo <- mutate(todo, cabin = ifelse(todo$Cabin=="", "No Cabin", "Cabin"))
+todo <- mutate(todo, cabin = factor(cabin))
+
+
+# Veo cuántas columnas se pueden convertir en factores:
+apply(todo, 2, function(x) length(unique(x)))
+
+
+# Convertimos en factores a las columnas: Survived, Pclass, Sex, cabin
+todo <- mutate(todo,
+                Survived = factor(Survived),
+                Pclass = factor(Pclass),
+                Sex = factor(Sex),
+                Embarked = factor(Embarked),
+                )
+
+# La nueva estructura del dataset completo queda de la siguiente manera y volvemos a dividirlo en train y test.
+str(todo)
+train <- todo[1:rows_train, ]
+test <- todo[-(1:rows_train), ] %>% select(-Survived)
+```
+
+# 3. Análisis descriptivo
+
+Realizaremos ahora un análisis descriptivo para comprender la relación entre las variables, y evaluar si a partir de estas relaciones se puede predecir la probabilidad de sobrevivir al accidente.
+
+## Relacion entre Survival y Sex
+
+```{r survival/sex, echo=TRUE}
+ggplot(
+  data = train,
+  aes(x = Sex, fill = Survived)) +
+  geom_bar() +
+  ggtitle ("Cantidad de sobrevivientes por sexo")
+```
+Se observa que sobrevivieron mas mujeres que hombres, y tambien en es mayor la proporcion de mujeres que sobrevivieron sobre el total de muejres. Veamos esto en porcentajes:
+
+```{r survival/sex 2, echo=TRUE}
+ggplot(
+  data = train,
+  aes(x = Sex, fill = Survived)) +
+  geom_bar(position = "fill") +
+  ylab("Frequency") +
+  ggtitle ("Proporcion de sobrevivientes por sexo")
+```
+Se observa que el 75% de las mujeres sobrevivieron, mientras que los hombres, solo sobrevivieron menos del 25%.
+
+## Relacion entre Survival y Embarked
+
+```{r survival/embarked, echo=TRUE}
+ggplot(
+  data = train,
+  aes(x = Embarked, fill = Survived)) +
+  geom_bar(position = "fill") +
+  ylab("Frequency") +
+  ggtitle ("Proporcion de sobrevivientes por lugar de embarque")
+```
+
+Se observa que de las personas que embarcaron en Cherbourg, sobrevivieron más del 50%, mientras que de los que embarcaron en en Queenstown o Southampton sobrevivieron menos de la mitad.
+
+## Relacion entre Survival y Pclass
+
+```{r survival/pclass, echo=TRUE}
+ggplot(
+  data = train,
+  aes(x = Pclass, fill = Survived)) +
+  geom_bar(position = "fill") + 
+  ylab("Frequency") +
+  ggtitle ("Proporcion de sobrevivientes por clase")
+```
+Se observa que la mayor proporcion de sobrevivientes estaban en primera clase, seguidos por los de segunda clase.
+
+Veamos ahora si hay relacion entre los sobrevivientes por clase, y por lugar de embarque.
+
+```{r survival/pclass 2, echo=TRUE}
+ggplot(
+  data = train,
+  aes(x = Pclass, fill = Survived)) +
+  geom_bar() +
+  facet_wrap(~Embarked) +
+  ggtitle ("Proporcion de sobrevivientes por clase y lugar de embarque")
+```
+Se observa que la variable que predomina en la definicion de la superviviencia es la clase y no la zona de embarque.
+
+## Relacion entre Survival, Sibsp y Parch
+
+```{r survival/sibsp, echo=TRUE}
+ggplot(
+  data = train,
+  aes(x = SibSp, fill = Survived)) +
+  geom_bar() +
+  ggtitle ("Cantidad de sobrevivientes por cantidad de hermanos")
+
+ggplot(
+  data = train,
+  aes(x = Parch, fill = Survived)) +
+  geom_bar()
+```
+
+Se observa que, a mayor cantidad de hermanos, menor es la proporcion de sobrevivientes.
+
+Veamos la proporción de sobrevivientes en función del tamaño de la familia:
+
+```{r survival/sibsp 2, echo=TRUE}
+train$FamilySize <- train$SibSp + train$Parch +1;
+
+ggplot(
+  data = train[!is.na(train$FamilySize),],
+  aes(x = FamilySize, fill = Survived)) +
+  geom_histogram(binwidth = 1, position = "fill") +
+  ylab("Frequency") +
+  ggtitle ("Proporcion de sobrevivientes según el tamano de la familia")
+```
+
+Las familias compuestas por 2 a 6 integrantes sobrevivieron en más de un 50%.
+
+## Relacion entre Survival y Age
+
+```{r survival/age, echo=TRUE}
+ggplot(
+  data = train[!(is.na(train$Age)), ],
+  aes(x = Age, fill = Survived)) +
+  geom_histogram(binwidth = 3) +
+  ggtitle("Cantidad de sobrevivientes por edad")
+
+ggplot(
+  data = train[!is.na(train$Age), ],
+  aes(x = Age, fill = Survived))+
+  geom_histogram(binwidth = 3, position= "fill") +
+  ylab("Frequency") +
+  ggtitle("Proporcion de sobrevivientes por edad")
+```
+
+Se observa que la tasa de superviviencia es inversamente proporcional a la edad. No obstante, todas las personas de alrededor de 80 anos sobrevivieron.
+
+Parece hasta ahora que se cumple el dicho "mujeres y niños primero".
+
+## Relacion entre Survival y Fare
+
+```{r survival/fare, echo=TRUE}
+ggplot(
+  data = train,
+  aes(x = Fare, fill = Survived)) +
+  geom_histogram(binwidth = 20, position = "fill") +
+  ggtitle ("Proporcion de sobrevivientes por tarifa pagada")
+
+train$Fare[is.na(train$Fare)] <- mean(train$Fare, na.rm=T)
+```
+
+Se observa que las personas que pagaron una tarifa mas baja sobrevivieron en menor tasa.
+
+## Diagrama de correlacion
+
+Realizaremos ahora un diagrama de correlacion entre las principales variables.
+
+```{r correlacion, echo=TRUE}
+pairs.panels(
+  train[c("Survived", "Pclass", "Sex", "Age", "Embarked",  "FamilySize", "Fare")],
+  pch = '.')
+```
+La supervivencia estuvo principalmente ligada al sexo (en primer lugar), a la clase (en segundo lugar) y finalmente a la tarifa (en tercer lugar).
+
+# 4. Analisis predictivo con árbol de clasificacion
+
+## Construccion del grafico
+
+Entrenamos un modelo con validación cruzada ya que nuestro set de validación no tiene completa la variable "Survived". De este modo en cada iteración vamos a tomar un set de pruba diferente mientras que los demás datos se considerarán de entrenamiento. 
+
+```{r arbol seteos, echo=TRUE}
+formula <- formula(
+  Survived ~ Pclass + Sex + Age + SibSp + Parch + Fare + Embarked + cabin)
+
+set.seed(123)
+
+caret.control <- trainControl(method = "repeatedcv",
+                              number = 10, #10kf
+                              repeats = 3) 
+
+arbol.titanic <- train(formula, 
+                  data = train,
+                  method = "rpart",
+                  trControl = caret.control)
+
+arbol.titanic
+```
+
+### Graficos
+
+Probaremos distintos graficos a ver cuál nos resulta más facil visualmente para el analisis.
+
+```{r grafico arbol, echo=TRUE}
+prp(arbol.titanic$finalModel, main = "1. Salida PRP", extra = 101, type = 2,  xsep = "/")
+
+rpart.plot(arbol.titanic$finalModel, main = "2. Salida RPART")
+```
+
+### Interpretación árbol
+De acuerdo al árbol anterior, lo que podemos interpretar es que las variavles más relevantes para establcer un patrón de supervivencia son Sexo, Clase y Tarifa:
+- Si era varón la probabilidad de sobrevivir era de 35% (1- 65%). 
+- Si era mujer, resultaba relevante en primer lugar la clase. Si además, pertenecía a 1ra y 2da clase,tenía un 19% de probabilidad más de sobrevivir. Si era de 3ra clase además resulta relevante la tarifa pagada ya que si era mayor a 23 resultaba más probable que sobreviviera. 
+
+### Otra opción de árbol de decisión
+
+```{r grafico arbol rpart, echo=TRUE}
+set.seed(123)
+
+arbol.titanic2 <- rpart(formula, data = train)
+
+#para evitar el overfitting sumamos el control para que el número mínimo de obs en cada nodo terminal sea mayor a 2
+arbol.titanic2 <- rpart(formula, train, control = rpart.control(minbucket = 2))
+
+#evaluamos la complejidad (cantidad de splits necesarios)
+printcp(arbol.titanic2)
+```
+
+En la salida del print cp se ven distintos valores de CP y es útil para saber si se puede podar el árbol. El árbol con el CP más chico es el que tiene más divisiones (8). El que tiene 0 divisiones es el raíz.
+
+Debemos definir qué valor de cp nos parece razonable. Se grafica la evolucion del CP para evaluar hasta que punto conviene ramificar sin sobreajustar, es decir cuando seguir dividiendo el árbol no aporta significativamente a la reducción del error. De acuerdo al gráfico dispuesto a continuación el arbol con tres cortes resultaría adecuado.
+
+```{r plotcp, echo=TRUE}
+plotcp(arbol.titanic2, upper = "splits")
+```
+Segun este ultimo grafico, deberia hacer un arbol 3 cortes.
+
+```{r 3 cortes, echo=TRUE}
+arbol.titanic2 <- prune(
+   arbol.titanic2,
+   cp = arbol.titanic2$cptable[arbol.titanic2$cptable[, 2] == 3, "CP"]
+)
+rpart.plot(arbol.titanic2, yesno = TRUE)
+```
+El árbol obtenido es muy similar al obtenido con kfolds. A su vez, las variables que toma en cuenta a la hora de armar el mismo son las mismas variables que más correlacionaban con "Survived".
+
+### Predicción
+
+```{r prediccion, echo=TRUE}
+prediccion <- predict(arbol.titanic2, newdata = test, type = "class")
+knitr::kable(head(prediccion))
+
+#el archivo con la predicción se escribiría
+#write.table(predicción, "gender_submission.csv", row.names=FALSE)
+```
+
+# 5. Conclusiones
+
+Se realizaron dos tipos de árboles con métodos distintos y en ambos se obtuvieron resultados similares. Las variables sexo, clase y tarifa resultaron ser las más relevantes a la hora de predecir la supervivencia. En un primer análisis exploratorio esto se había evidenciado al analizar la correlación entre las variables y gracias al modelo realizado se pudieron delimitar los parámetros para establecer la predicción en el set de validación.
+
+# 6. Publicaciones consultadas
+
+https://www.kaggle.com/mrisdal/exploring-survival-on-the-titanic/report
+ 
+https://www.kaggle.com/thilakshasilva/predicting-titanic-survival-using-five-algorithms
+ 
+https://www.kaggle.com/erikbruin/titanic-2nd-degree-families-and-majority-voting/report
+ 
+https://www.kaggle.com/shiyongpang/titanic-data-eda-by-r/output
+ 
+https://www.kaggle.com/hiteshp/head-start-for-data-scientist
